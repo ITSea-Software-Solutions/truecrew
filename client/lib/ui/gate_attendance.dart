@@ -41,6 +41,9 @@ class _GateAttendanceScreenState extends State<GateAttendanceScreen>
   bool _showingResult = false;
   final Map<Object, DateTime> _recentMarks = {};
   static const _cooldown = Duration(seconds: 90);
+  /// How long the verified card waits for the gate camera before showing the
+  /// registration photo instead. The mark itself never waits.
+  static const _proofGrace = Duration(milliseconds: 1200);
 
   @override
   void initState() {
@@ -173,15 +176,25 @@ class _GateAttendanceScreenState extends State<GateAttendanceScreen>
     final worker = result.worker;
     final proofFuture = silentSnap();
     final type = await app.nextTypeFor(worker['server_id'] as int? ?? -1);
-    final proofPath = await proofFuture;
-    await app.markAttendance(
+    // The mark is written the moment the finger verifies. The camera used to
+    // sit in front of it: a wedged driver could hold the gate for 16 seconds
+    // (4s enumerate + 6s init + 6s capture) with the worker already matched.
+    final uuid = await app.markAttendance(
       worker: worker,
       type: type,
       method: 'fingerprint',
       score: result.score,
       simulated: result.simulated,
-      proofPath: proofPath,
     );
+    // Proof attaches whenever the camera finishes; the uploader picks it up.
+    proofFuture
+        .then((p) => app.attachProof(uuid, p))
+        .catchError((_) {});
+    // The card gets a short chance to show the live shot — a healthy camera
+    // makes it — and otherwise falls back to the registration photo.
+    final quickProof = await proofFuture
+        .timeout(_proofGrace, onTimeout: () => null)
+        .catchError((_) => null);
     if (!mounted) return;
     setState(() => _status = null);
     await showGateResult(
@@ -192,7 +205,7 @@ class _GateAttendanceScreenState extends State<GateAttendanceScreen>
       score: result.score,
       simulated: result.simulated,
       queuedOffline: !app.online,
-      proofPath: proofPath,
+      proofPath: quickProof,
     );
   }
 
@@ -305,15 +318,22 @@ class _GateAttendanceScreenState extends State<GateAttendanceScreen>
       ),
     );
     if (type == null) return;
-    final proofPath = await proofFuture; // usually already done
-    await app.markAttendance(
+    // Same rule as the hands-free path: the mark never waits on the camera.
+    // The dialog usually covered the snap already; if it did not, the card
+    // shows the registration photo and the proof attaches when it lands.
+    final uuid = await app.markAttendance(
       worker: worker,
       type: type,
       method: 'fingerprint',
       score: result.score,
       simulated: result.simulated,
-      proofPath: proofPath,
     );
+    proofFuture
+        .then((p) => app.attachProof(uuid, p))
+        .catchError((_) {});
+    final proofPath = await proofFuture
+        .timeout(_proofGrace, onTimeout: () => null)
+        .catchError((_) => null);
     if (mounted) {
       setState(() => _status = null);
       // The "verified" moment: check + all three photos + greeting.

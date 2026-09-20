@@ -801,7 +801,9 @@ class AppState extends ChangeNotifier {
     return (r.first['type'] == 'IN') ? 'OUT' : 'IN';
   }
 
-  Future<void> markAttendance({
+  /// Writes the mark locally and returns its client_uuid. Nothing here waits
+  /// on the network: the row is queued and pushed by the next sync pass.
+  Future<String> markAttendance({
     required Map<String, Object?> worker,
     required String type,
     required String method,
@@ -810,8 +812,9 @@ class AppState extends ChangeNotifier {
     String? proofPath,
   }) async {
     final db = await LocalDb.instance();
+    final clientUuid = _uuid.v4();
     await db.insert('attendance', {
-      'client_uuid': _uuid.v4(),
+      'client_uuid': clientUuid,
       'worker_uuid': worker['client_uuid'],
       'worker_server_id': worker['server_id'],
       'worker_name': worker['name'],
@@ -829,6 +832,19 @@ class AppState extends ChangeNotifier {
     });
     await _refreshPending();
     notifyListeners();
+    if (online) sync();
+    return clientUuid;
+  }
+
+  /// The gate camera's proof shot lands AFTER the mark is written — the worker
+  /// at the gate is never kept waiting on a camera driver. Attach it here; the
+  /// proof uploader already runs as its own pass (proof_synced = 0 once the
+  /// row has a server_id), so a late photo is uploaded like any other.
+  Future<void> attachProof(String clientUuid, String? path) async {
+    if (path == null) return;
+    final db = await LocalDb.instance();
+    await db.update('attendance', {'proof_path': path, 'proof_synced': 0},
+        where: 'client_uuid = ?', whereArgs: [clientUuid]);
     if (online) sync();
   }
 
